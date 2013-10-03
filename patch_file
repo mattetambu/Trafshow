@@ -1,0 +1,863 @@
+diff -ubwrN ./work-orig/trafshow-5.2.3/Makefile ./work/trafshow-5.2.3/Makefile
+--- ./work-orig/trafshow-5.2.3/Makefile	2013-06-14 15:51:13.000000000 +0200
++++ ./work/trafshow-5.2.3/Makefile	2013-07-09 00:47:46.000000000 +0200
+@@ -46,7 +46,7 @@
+ 
+ CSRC	= trafshow.c screen.c colormask.c getkey.c selector.c \
+ 	events.c session.c show_if.c show_stat.c show_dump.c \
+-	parse_dl.c parse_ip.c netstat.c cisco_netflow.c addrtoname.c \
++	parse_dl.c parse_ip.c netstat.c netstat_export.c cisco_netflow.c addrtoname.c \
+ 	hashtab.c lookupa.c recycle.c util.c help_page.c domain_resolver.c
+ YSRC	=
+ LSRC	=
+diff -ubwrN ./work-orig/trafshow-5.2.3/events.c ./work/trafshow-5.2.3/events.c
+--- ./work-orig/trafshow-5.2.3/events.c	2004-03-01 10:48:44.000000000 +0100
++++ ./work/trafshow-5.2.3/events.c	2013-07-09 00:47:46.000000000 +0200
+@@ -249,7 +249,7 @@
+ 	EVENT *ep;
+ 
+ 	for (ep = first_event; ep; ep = ep->next) {
+-		if ((!func || ep->func == func) && ep->arg == arg) {
++		if ((!func || ep->func == func) && (!arg || ep->arg == arg)) {
+ 			ep->func = 0;
+ 			found++;
+ 		}
+diff -ubwrN ./work-orig/trafshow-5.2.3/events.h ./work/trafshow-5.2.3/events.h
+--- ./work-orig/trafshow-5.2.3/events.h	2004-02-17 05:57:00.000000000 +0100
++++ ./work/trafshow-5.2.3/events.h	2013-07-09 00:47:46.000000000 +0200
+@@ -64,6 +64,7 @@
+ /*
+  * Remove system event from queue if any.
+  * Null func pointer may be used as wildcard ANY.
++ * Null arg  pointer may be used as wildcard ANY.
+  * Return number of removed events.
+  */
+ int remove_event(void (*func)(void *), void *arg);
+Files ./work-orig/trafshow-5.2.3/events.o and ./work/trafshow-5.2.3/events.o differ
+diff -ubwrN ./work-orig/trafshow-5.2.3/getkey.c ./work/trafshow-5.2.3/getkey.c
+--- ./work-orig/trafshow-5.2.3/getkey.c	2006-01-08 06:39:37.000000000 +0100
++++ ./work/trafshow-5.2.3/getkey.c	2013-07-09 00:47:46.000000000 +0200
+@@ -33,6 +33,7 @@
+ #include "show_dump.h"
+ #include "events.h"
+ #include "netstat.h"
++#include "netstat_export.h"
+ #include "help_page.h"
+ 
+ 
+@@ -106,6 +107,7 @@
+ 	int ch = key;
+ 	PCAP_HANDLER *ph = 0;
+ 	SELECTOR *sp = 0;
++	struct export_file_list *fl = 0;
+ 	struct timeval now;
+ 
+ 	if (prompt_mode) {
+@@ -115,6 +117,27 @@
+ 			return;
+ 		if (ch > 0) {
+ 			switch (prompt_mode) {
++			case 'e':	/* end of getting export window */
++			case 'E':
++				ch = atoi(prompt_buf);
++				if (ch >= EXPORT_MIN_WINDOW) {
++					export_window = ch;	
++
++					fl = already_exporting_ph(pcap_get_selected(ph_list));
++					if (!fl) {	/* not already exporting */
++						if (netstat_export_init(pcap_get_selected(ph_list)) < 0) {
++							fprintf(stderr, "Can't export the netstats");
++							exit(1);
++						}
++						if (!export_flag) {
++							export_flag = 1;
++							netstat_export(ph_list);
++						}
++					}
++					else fl->export_window = export_window;
++				}
++				else	txt = "Export Time must be at least 10 sec";
++				break;
+ 			case 'r':	/* end of getting refresh time */
+ 			case 'R':
+ 				ch = atoi(prompt_buf);
+@@ -238,6 +261,29 @@
+ 			return;
+ 		}
+ 		break;
++	case 'e':	/* start netstat export */
++	case 'E':
++		if (show_mode == NetStat) {
++			prompt_mode = ch;
++			snprintf(prompt_buf, sizeof(prompt_buf), "%d", export_window);
++			init_edit_string("Export seconds: ", numbers, 5);
++			selector_withdraw(get_selector(ph_list));
++			screen_update();
++			return;
++		}
++		break;
++	case K_CTRL('E'):	/* turn off netstat export */
++		if (show_mode == NetStat) {
++			fl = already_exporting_ph(pcap_get_selected(ph_list));
++			if (fl) {	/* already exporting the interface */
++				netstat_export_stop(fl);
++				screen_status("Export paused for the interface");
++			}
++			else screen_status("Export is not active for the interface");
++			return;
++		}
++		break;
++		
+ 	case 'r':	/* start to get refresh time */
+ 	case 'R':
+ 		if (show_mode != FlowDump) {
+diff -ubwrN ./work-orig/trafshow-5.2.3/getkey.h ./work/trafshow-5.2.3/getkey.h
+--- ./work-orig/trafshow-5.2.3/getkey.h	2004-02-14 13:25:13.000000000 +0100
++++ ./work/trafshow-5.2.3/getkey.h	2013-07-09 00:47:46.000000000 +0200
+@@ -49,6 +49,7 @@
+ #define	K_F12		0xc000
+ 
+ struct pcap_handler;
++struct export_file_list;
+ void getkey_init(struct pcap_handler *ph_list);
+ 
+ #endif	/* !_GETKEY_H_ */
+Files ./work-orig/trafshow-5.2.3/getkey.o and ./work/trafshow-5.2.3/getkey.o differ
+diff -ubwrN ./work-orig/trafshow-5.2.3/help_page.c ./work/trafshow-5.2.3/help_page.c
+--- ./work-orig/trafshow-5.2.3/help_page.c	2004-06-17 10:17:26.000000000 +0200
++++ ./work/trafshow-5.2.3/help_page.c	2013-07-09 00:47:46.000000000 +0200
+@@ -58,6 +58,8 @@
+  { K_RIGHT,	"  Right",	"Rotate show mode right" },
+  { K_TAB,	"   Tab",	"Move cursor to backflow if any" },
+  { K_CTRL('L'),	"  Ctrl-L",	"Refresh screen from scratch" },
++ { 'e',		"    E",	"Begin to export the network stats on file" },
++ { K_CTRL('e'),	"  Ctrl-E",	"Stop to export the network stats on file" },
+  { 'r',		"    R",	"Set the screen refresh-period.." },
+  { 'p',		"    P",	"Set the expired data purge-period.." },
+  { 'f',		"    F",	"Set the filter expression (empty to reset).." },
+Files ./work-orig/trafshow-5.2.3/help_page.o and ./work/trafshow-5.2.3/help_page.o differ
+diff -ubwrN ./work-orig/trafshow-5.2.3/netstat_export.c ./work/trafshow-5.2.3/netstat_export.c
+--- ./work-orig/trafshow-5.2.3/netstat_export.c	1970-01-01 01:00:00.000000000 +0100
++++ ./work/trafshow-5.2.3/netstat_export.c	2013-07-09 00:47:46.000000000 +0200
+@@ -0,0 +1,538 @@
++/*
++ *	Copyright (c) 1993-2006 Rinet Corp., Novosibirsk, Russia
++ *
++ * Redistribution and use in source forms, with and without modification,
++ * are permitted provided that this entire comment appears intact.
++ *
++ * THIS SOURCE CODE IS PROVIDED ``AS IS'' WITHOUT ANY WARRANTIES OF ANY KIND.
++ */
++
++#include "netstat_export.h"
++#include "trafshow.h"
++#include "show_stat.h"
++#include "selector.h"
++#include "netstat.h"
++#include "events.h"
++#include "screen.h" /* just for line_factor */
++
++int export_flag = 0;
++int intervall_ID = 0;
++int export_window = EXPORT_DEFAULT_WINDOW;
++int export_time = EXPORT_TIME;
++char base_export_dir [256];
++
++EXPORT_FILE_LIST* file_list;
++
++	
++static void
++scale_size(addr, prot, data, rate)
++	int *addr, *prot, *data, *rate;
++{
++	*addr	= line_factor * (double)SHOW_STAT_ADDR;
++	*prot	= line_factor * (double)SHOW_STAT_PROT;
++	*data	= line_factor * (double)SHOW_STAT_DATA;
++	*rate	= line_factor * (double)SHOW_STAT_RATE;
++}
++
++EXPORT_FILE_LIST*
++already_exporting_ph (arg)
++	void *arg;
++{
++	PCAP_HANDLER *ph = (PCAP_HANDLER *)arg, *lph;
++	EXPORT_FILE_LIST *fl = file_list;
++	
++	for (; fl; fl = fl->next) {
++		for (lph = fl->php; lph; lph = lph->deep) 
++			if (lph == ph) return fl;
++	}
++
++	return NULL;
++}
++
++static int
++find_flow_ID (idx, now, src_buf, dst_buf, proto_buf)
++	int idx;
++	struct timeval now;
++	char *src_buf, *dst_buf, *proto_buf;
++{
++	int i = 0;
++	NETSTAT_FLOW* fw;
++	EXPORT_FILE_LIST* fl;
++	
++	/* sanity check - sould not happen */
++	if (idx < 0)
++		return -1;
++	
++	for (fl = file_list; fl; fl = fl->next, i++)
++		if (i == idx) break;
++	
++	/* should not happen */
++	if (!fl) 
++		return -1;
++	
++	/* move to the end of the list */
++	for (fw = fl->flow_list; fw; fw = fw->next)
++		if (strcmp (src_buf, fw->source) == 0 &&
++			strcmp (dst_buf, fw->destination) == 0 &&
++			strcmp (proto_buf, fw->protocol) == 0) break;
++	
++	/* match - refresh modification time and return */
++	if (fw) {
++		fw->mtime = now;
++		return fw->flow_ID;
++	}
++	
++	/* add the new flow up to the list */
++	if ((fw = (NETSTAT_FLOW *)malloc(sizeof(NETSTAT_FLOW))) == 0) {
++		perror("malloc");
++		exit(1);
++	}
++	memset(fw, 0, sizeof(NETSTAT_FLOW));
++	fw->flow_ID = fl->flow_counter++;
++	fw->mtime = now;
++	fw->source = strdup (src_buf);
++	fw->destination = strdup (dst_buf);
++	fw->protocol = strdup (proto_buf);
++	fw->next = fl->flow_list;
++	fl->flow_list = fw;
++
++	return fw->flow_ID;
++}
++
++
++static void
++flow_list_purge (arg)
++	void *arg; /* EXPORT_FILE_LIST */
++{
++	NETSTAT_FLOW *prev, *fw;
++	EXPORT_FILE_LIST* fl;
++	struct timeval now;
++	gettimeofday(&now, 0);
++	now.tv_sec -= FLOW_LIST_PURGE_TIME;
++	
++	for (fl = file_list; fl; fl = fl->next) {
++		/* wrong element */
++		if (arg && fl != (EXPORT_FILE_LIST *) arg)
++			continue;
++		
++		prev = fw = fl->flow_list;
++		
++		/* move till the end of the list */
++		while (fw) {
++			if (arg || timercmp(&fw->mtime, &now, <)) {
++				free(fw->source);
++				free(fw->destination);
++				free(fw->protocol);
++				if (fw == fl->flow_list) {
++					fl->flow_list = fl->flow_list->next;
++					prev = 0;
++				}
++				else prev->next = fw->next;
++				memset(fw, 0, sizeof(NETSTAT_FLOW));
++				free(fw);
++			}
++			else 
++				prev = fw;
++			
++			if (prev) fw = prev->next;
++			else fw = prev = fl->flow_list;
++		}
++	}
++
++	/* schedule next time */
++	now.tv_sec += FLOW_LIST_PURGE_TIME * 2;
++	if (!arg) add_event(&now, flow_list_purge, arg);
++}
++
++static int
++get_header_to_export(dst, size)
++	char *dst;
++	int size;
++{
++	int addr_sz, prot_sz, data_sz, rate_sz, time_size = 20, flow_size = 8;
++	int text_size = 0;
++	
++	/* sanity check */
++	if (!dst || size < 1)
++		return -1;
++
++#ifdef EXPORT_SCALE_SIZE
++	scale_size(&addr_sz, &prot_sz, &data_sz, &rate_sz);
++#else
++	addr_sz = prot_sz = data_sz = rate_sz = time_size = flow_size = 0;
++#endif
++	
++	text_size += snprintf (dst, size,
++		"%-*.*s%c%-*.*s",
++		time_size,	time_size,	"Timestamp",
++		EXPORT_SEPARATOR,
++		flow_size,	flow_size,	"Flow_ID");
++#ifdef EXPORT_ADDRESSES
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s%c%-*.*s",
++		EXPORT_SEPARATOR,
++		addr_sz, addr_sz,	"Source",
++		EXPORT_SEPARATOR,
++		addr_sz, addr_sz,	"Destination");
++#endif
++#ifdef EXPORT_PROTOCOL
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s",
++		EXPORT_SEPARATOR,
++		prot_sz, prot_sz,	"Protocol");
++#endif
++#ifdef EXPORT_PACKET_LENGTH
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s%c%-*.*s",
++		EXPORT_SEPARATOR,
++		data_sz, data_sz,	"Size",
++		EXPORT_SEPARATOR,
++		rate_sz, rate_sz,	"CPS");
++#endif
++#ifdef EXPORT_DATA_LENGTH
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s%c%-*.*s",
++		EXPORT_SEPARATOR,
++		data_sz, data_sz,	"Data",
++		EXPORT_SEPARATOR,
++		rate_sz, rate_sz,	"CPS");
++#endif
++#ifdef EXPORT_PACKET_COUNT
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s%c%-*.*s",
++		EXPORT_SEPARATOR,
++		data_sz, data_sz,	"Packets",
++		EXPORT_SEPARATOR,
++		rate_sz, rate_sz,	"PPS");
++#endif
++	
++	return text_size;
++}
++
++static int
++get_line_to_export(dst, size, idx, ns_list, i)
++	char *dst;
++	int size, idx;
++	const NETSTAT **ns_list;
++	int i;
++{
++	int addr_sz, prot_sz, data_sz, rate_sz, time_size = 20, flow_size = 8, text_size = 0;
++	int flow_ID;
++	const NETSTAT *ns;
++	char src_buf[100], dst_buf[100], proto_buf[20];
++	char pkt_len_buf[20], pkt_len_rate_buf[20];
++	char data_len_buf[20], data_len_rate_buf[20];
++	char pkt_count_buf[20], pkt_count_rate_buf[20];
++	char flow_ID_buf[10];
++	struct timeval now;
++	struct tm *now_time_p;
++	char time_buf[64];
++
++	gettimeofday(&now, 0);
++	now_time_p = localtime(&now.tv_sec);
++	strftime(time_buf, sizeof(time_buf), "%Y-%m-%d,%H.%M.%S", now_time_p);
++
++	/* sanity check */
++	if (!dst || size < 1 || !ns_list || idx < 0 || i < 0)
++		return -1;
++
++	ns = ns_list[i];
++	
++	/* check modification time */
++	now.tv_sec -= EXPORT_TIME;
++	if (timercmp(&ns->mtime, &now, <)) 
++		return 0;
++	
++	scale_size(&addr_sz, &prot_sz, &data_sz, &rate_sz);
++	hdr2str(&ns->ns_hdr,
++		src_buf, MIN(sizeof(src_buf), addr_sz + 1),
++		dst_buf, MIN(sizeof(dst_buf), addr_sz + 1),
++		proto_buf, MIN(sizeof(proto_buf), prot_sz + 1));
++		
++	flow_ID = find_flow_ID (idx, now, src_buf, dst_buf, proto_buf);
++
++#ifndef EXPORT_SCALE_SIZE
++	addr_sz = prot_sz = data_sz = rate_sz = time_size = flow_size = 0;
++#endif
++	
++	//pkt_len_buf[0] = '\0'; pkt_len_rate_buf[0] = '\0';
++	//data_len_buf[0] = '\0'; data_len_rate_buf[0] = '\0';
++	//pkt_count_buf[0] = '\0'; pkt_count_rate_buf[0] = '\0';
++	
++	snprintf(flow_ID_buf, sizeof(flow_ID_buf), "%u", flow_ID);	
++	snprintf(pkt_len_buf, sizeof(pkt_len_buf), "%u", ns->pkt_len);
++	//if (ns->pkt_len_rate > 0)
++		snprintf(pkt_len_rate_buf, sizeof(pkt_len_rate_buf), "%u", ns->pkt_len_rate);
++	snprintf(data_len_buf, sizeof(data_len_buf), "%u", ns->data_len);
++	//if (ns->data_len_rate > 0)
++		snprintf(data_len_rate_buf, sizeof(data_len_rate_buf), "%u", ns->data_len_rate);
++	snprintf(pkt_count_buf, sizeof(pkt_count_buf), "%u", ns->pkt_cnt);
++	//if (ns->pkt_cnt_rate > 0)
++		snprintf(pkt_count_rate_buf, sizeof(pkt_count_rate_buf), "%u", ns->pkt_cnt_rate);
++
++	
++	text_size += snprintf (dst, size,
++		"%-*.*s%c%-*.*s",
++		time_size,	time_size,	time_buf,
++		EXPORT_SEPARATOR,
++		flow_size,	flow_size,	flow_ID_buf);
++#ifdef EXPORT_ADDRESSES
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s%c%-*.*s",
++		EXPORT_SEPARATOR,
++		addr_sz, addr_sz,	src_buf,
++		EXPORT_SEPARATOR,
++		addr_sz, addr_sz,	dst_buf);
++#endif
++#ifdef EXPORT_PROTOCOL
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s",
++		EXPORT_SEPARATOR,
++		prot_sz, prot_sz,	proto_buf);
++#endif
++#ifdef EXPORT_PACKET_LENGTH
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s%c%-*.*s",
++		EXPORT_SEPARATOR,
++		data_sz, data_sz,	pkt_len_buf,
++		EXPORT_SEPARATOR,
++		rate_sz, rate_sz,	pkt_len_rate_buf);
++#endif
++#ifdef EXPORT_DATA_LENGTH
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s%c%-*.*s",
++		EXPORT_SEPARATOR,
++		data_sz, data_sz,	data_len_buf,
++		EXPORT_SEPARATOR,
++		rate_sz, rate_sz,	data_len_rate_buf);
++#endif
++#ifdef EXPORT_PACKET_COUNT
++	text_size += snprintf (dst + text_size, size - text_size,
++		"%c%-*.*s%c%-*.*s",
++		EXPORT_SEPARATOR,
++		data_sz, data_sz,	pkt_count_buf,
++		EXPORT_SEPARATOR,
++		rate_sz, rate_sz,	pkt_count_rate_buf);
++#endif
++
++	return text_size;
++}
++
++static FILE*
++get_export_file_descriptor(idx, change_export_file)
++	int idx; /* pcap_handler index */
++	int change_export_file; /* need to create a new file */
++{
++	EXPORT_FILE_LIST* fl = file_list;
++	int i = 0, skip_header = 0;
++	char buf[256];
++	
++	/* sanity check */
++	if (idx < 0)
++		return NULL;
++	
++	for (; fl; fl = fl->next, i++)
++		if (i == idx) break;
++	
++	/* should not happen */
++	if (!fl) 
++		return NULL;
++	
++	/* need to change file */
++	if (change_export_file) { 
++		if (fl->fd) /* file exists */
++			fclose (fl->fd);
++		
++		snprintf (buf, sizeof(buf),
++			"%s//%s//%s_%d.export.%s",
++			base_export_dir,
++			fl->php->name,
++			fl->php->name,
++			fl->intervall_ID,
++			EXPORT_FILE_EXT);
++				
++		if (export_flag && ((fl->fd = fopen (buf, "r")) != NULL)) { /* file exist - resuming a paused export */
++			skip_header = 1;			
++			fclose(fl->fd);
++		}
++
++		if ((fl->fd = fopen (buf, "a")) == NULL) /* create the export file */
++			return NULL;
++				
++#ifdef EXPORT_HEADER
++		/* get header area to export */
++		if (!skip_header && get_header_to_export(buf, sizeof(buf)) > 0) {
++			fprintf (fl->fd, "%s\n", buf);
++			fflush (fl->fd);
++		}
++#endif
++	}
++	
++	return fl->fd;
++}
++
++int
++netstat_export_init(arg)
++	void *arg;
++{
++	PCAP_HANDLER *ph = (PCAP_HANDLER *)arg, *sph = pcap_get_selected(ph);
++	EXPORT_FILE_LIST *fl, *prev;
++	char buf[256];
++	int idx = 0;
++	struct timeval now;
++	struct tm *now_time_p;
++	char time_buf[64];
++
++	/* sanity check */
++	if (!arg) {
++		fprintf(stderr, "Invalid args for the export initialization\n");
++		return -1;
++	}
++	
++	/* export not running */
++	if (!export_flag) {
++		gettimeofday(&now, 0);
++		now_time_p = localtime(&now.tv_sec);
++		strftime(time_buf, sizeof(time_buf), "%Y-%m-%d,%H.%M.%S", now_time_p);
++
++		snprintf (base_export_dir, sizeof(base_export_dir),
++			"%s//%s",
++			EXPORT_DIR,
++			time_buf);
++
++#ifdef FLOW_LIST_PURGE
++		flow_list_purge (NULL);
++#endif
++	}
++	
++	/* move to the end of the list */
++	for (fl = file_list, prev = NULL; fl; prev = fl, fl = fl->next)
++		idx++;
++	
++	for (; ph; ph = ph->next, prev = fl, fl = fl->next, idx++) {
++		snprintf (buf, sizeof(buf),
++			"%s %s//%s",
++			EXPORT_MKDIR_COMMAND,
++			base_export_dir,
++			ph->name);
++		
++		/* make the working dir for the pcap-handler */
++		if (system(buf)) { 
++			fprintf(stderr, "Can't create the directory for the netstat export\n");
++			return -1;
++		}
++	
++		if ((fl = (EXPORT_FILE_LIST *)malloc(sizeof(EXPORT_FILE_LIST))) == 0) {
++			perror("malloc");
++			return -1;
++		}
++		memset(fl, 0, sizeof(EXPORT_FILE_LIST));
++		fl->php = ph;
++		fl->export_window = export_window;
++		fl->intervall_ID = intervall_ID;
++		//fl->export_count = 0;
++		//fl->flow_count = 0;
++		
++		if (!file_list) file_list = fl;
++		else prev->next = fl;
++		
++		/* make the first export file */
++		if ((fl->fd = get_export_file_descriptor (idx, 1 /* create */)) == NULL) { 
++			fprintf(stderr, "Can't create the file for the netstat export");
++			return -1;
++		}
++		
++		if (export_flag || sph) 
++			break;
++	}
++	
++	return 0;
++}
++
++void
++netstat_export_stop(arg)
++	void *arg;
++{
++	EXPORT_FILE_LIST *fl = file_list, *prev = fl;
++	
++	while (fl) {
++		if (!arg || fl == (EXPORT_FILE_LIST *) arg) {
++			/* close export file */
++			if (fl->fd) 
++				fclose (fl->fd);
++
++			/* destroy flow list */
++			flow_list_purge (fl);
++		
++			if (fl == file_list) {
++				file_list = file_list->next;
++				prev = 0;
++			}
++			else prev->next = fl->next;
++			
++			memset(fl, 0, sizeof(EXPORT_FILE_LIST));
++			free(fl);
++		}
++		else { /* wrong element */
++			prev = fl;
++		}
++
++		if (prev) fl = prev->next;
++		else fl = prev = file_list;
++	}
++}
++
++void
++netstat_export(arg)
++	void *arg;	/* just for correctly set the add_event */
++{
++	EXPORT_FILE_LIST* fl = file_list;
++	PCAP_HANDLER *ph;
++	SELECTOR *sp;
++	FILE* fd;
++	int i = 0, idx = 0, limit_reached;
++	char buf[1024];
++	struct timeval now;
++	gettimeofday(&now, 0);
++	
++	for (; fl; fl = fl->next) {
++		ph = fl->php;
++		if (ph == NULL) {	/* should not happen */
++			fprintf(stderr, "Can't access to the pcap handler for the netstat export");
++			exit(1);
++		}
++		
++		limit_reached = (fl->export_count >= (fl->export_window / export_time - 1));
++		if (limit_reached) {
++			fl->intervall_ID++;
++			fl->export_count = 0;
++			if (intervall_ID < fl->intervall_ID) 
++				intervall_ID++; 
++		}
++		else fl->export_count++;
++
++		while (ph->deep) ph = ph->deep;
++		sp = show_stat_list(ph);
++		if (sp == NULL) {	/* should not happen */
++			fprintf(stderr, "Can't access to the selector for the netstat export");
++			exit(1);
++		}
++		
++		fd = get_export_file_descriptor (idx++, limit_reached);
++		if (fd == NULL) {
++			fprintf(stderr, "Can't create the file for the netstat export");
++			exit(1);
++		}
++
++		for (i = 0; i < sp->items; i++) {
++			/* get main area to export */
++			if (get_line_to_export(buf, sizeof(buf), idx-1, sp->list, i) > 0) 
++				fprintf (fd, "%s\n", buf);
++		}
++		fflush (fd);
++	}
++		
++	/* schedule next time */
++	now.tv_sec += export_time;
++	add_event(&now, netstat_export, arg);
++}
+diff -ubwrN ./work-orig/trafshow-5.2.3/netstat_export.h ./work/trafshow-5.2.3/netstat_export.h
+--- ./work-orig/trafshow-5.2.3/netstat_export.h	1970-01-01 01:00:00.000000000 +0100
++++ ./work/trafshow-5.2.3/netstat_export.h	2013-07-09 00:47:46.000000000 +0200
+@@ -0,0 +1,79 @@
++/*
++ *	Copyright (c) 1993-2006 Rinet Corp., Novosibirsk, Russia
++ *
++ * Redistribution and use in source forms, with and without modification,
++ * are permitted provided that this entire comment appears intact.
++ *
++ * THIS SOURCE CODE IS PROVIDED ``AS IS'' WITHOUT ANY WARRANTIES OF ANY KIND.
++ */
++ 
++#ifndef	_NETSTAT_EXPORT_H_
++#define	_NETSTAT_EXPORT_H_
++
++	#include <stdio.h>
++	#include <stdlib.h>
++	#include <signal.h>
++	#include <string.h>
++	#include <unistd.h>
++	#include <time.h>
++	#include <pcap.h>
++	#include <errno.h>
++	#include <sys/types.h>
++	#include <sys/socket.h>
++	
++
++	#define EXPORT_HEADER
++	#define EXPORT_SCALE_SIZE
++	#define EXPORT_SEPARATOR '\t'
++	
++	#define EXPORT_ADDRESSES
++	#define EXPORT_PROTOCOL
++	#define EXPORT_PACKET_LENGTH
++	#define EXPORT_DATA_LENGTH
++	#define EXPORT_PACKET_COUNT
++
++	#define EXPORT_TIME		1	// [sec]
++	#define EXPORT_MIN_WINDOW	10	// [sec]
++	#define EXPORT_DEFAULT_WINDOW	60	// [sec]
++
++	#define FLOW_LIST_PURGE
++	#define FLOW_LIST_PURGE_TIME	300	// [sec]
++
++	#define EXPORT_MKDIR_COMMAND "mkdir -p"
++	#define EXPORT_FILE_EXT "txt"
++	#define EXPORT_DIR "./NETSTAT"
++	
++	struct pcap_handler;
++
++	typedef	struct netstat_flow {
++		struct timeval mtime;			// last modification time
++		int flow_ID;				// ID of the flow
++		char *source;
++		char *destination;
++		char *protocol;		
++		struct netstat_flow *next;
++	} NETSTAT_FLOW;
++
++	typedef struct export_file_list {
++		NETSTAT_FLOW *flow_list;		// flow list of the interface
++		struct pcap_handler *php;		// pcap_handler_pointer
++		FILE* fd;				// file descriptor where export the netstats
++		struct export_file_list* next;		// next item in list
++		int export_window;			// time that must be spent before changing the output file
++		int export_count;			// export counter
++		int flow_counter;			// flow counter
++		int intervall_ID;			// file counter
++	} EXPORT_FILE_LIST;
++
++	/* function prototypes */
++	EXPORT_FILE_LIST* already_exporting_ph (void *arg); /* PCAP_HANDLER */
++	int netstat_export_init(void *arg); /* PCAP_HANDLER */
++	void netstat_export_stop(void *arg);  /* EXPORT_FILE_LIST */
++	void netstat_export(void *arg); /* PCAP_HANDLER */
++
++	/* global variables */
++	extern int export_flag;
++	extern int export_window;
++	extern EXPORT_FILE_LIST* file_list;
++
++#endif
+Files ./work-orig/trafshow-5.2.3/netstat_export.o and ./work/trafshow-5.2.3/netstat_export.o differ
+Files ./work-orig/trafshow-5.2.3/show_dump.o and ./work/trafshow-5.2.3/show_dump.o differ
+Files ./work-orig/trafshow-5.2.3/trafshow and ./work/trafshow-5.2.3/trafshow differ
+diff -ubwrN ./work-orig/trafshow-5.2.3/trafshow.c ./work/trafshow-5.2.3/trafshow.c
+--- ./work-orig/trafshow-5.2.3/trafshow.c	2013-06-14 15:50:29.000000000 +0200
++++ ./work/trafshow-5.2.3/trafshow.c	2013-07-09 00:47:46.000000000 +0200
+@@ -49,6 +49,7 @@
+ #include "selector.h"
+ #include "addrtoname.h"
+ #include "netstat.h"
++#include "netstat_export.h"
+ #include "util.h"
+ #include "events.h"
+ #include "session.h"
+@@ -114,7 +115,7 @@
+ 	}
+ 
+ 	opterr = 0;
+-	while ((op = getopt(argc, argv, "a:bc:i:ns:u:pF:R:P:vh?")) != EOF) {
++	while ((op = getopt(argc, argv, "a:bc:e:i:ns:u:pF:R:P:vh?")) != EOF) {
+ 		switch (op) {
+ 		case 'a':
+ 			aggregate = atoi(optarg);
+@@ -127,6 +128,12 @@
+ 		case 'c':
+ 			color_conf = optarg;
+ 			break;
++		case 'e':
++				if ((export_window = atoi(optarg)) < 1 ||
++					 export_window < EXPORT_MIN_WINDOW)
++						usage();
++				export_flag = 1;
++				break;
+ 		case 'i':
+ 			dev_name = optarg;
+ 			break;
+@@ -192,6 +199,16 @@
+ 		show_mode = NetStat;
+ 	}
+ 
++	/* inizialize netstat export */
++	if (export_flag && ph_list) {
++		export_flag = 0;
++		if (netstat_export_init(ph_list) < 0) {
++			fprintf(stderr, "Can't export netstats\n");
++			exit(1);
++		}
++		export_flag = 1;
++	}
++	
+ 	/* get back to user process */
+ 	setuid(getuid());
+ 
+@@ -260,6 +277,7 @@
+ cleanup()
+ {
+ 	if (dump_file) (void)unlink(dump_file);
++	if (export_flag) netstat_export_stop(NULL);
+ 	screen_close();
+ 	_exit(0);
+ }
+@@ -784,6 +802,10 @@
+ 	/* init keyboard functions */
+ 	getkey_init(ph_list);
+ 
++	/* start export */
++	if (export_flag)
++		netstat_export(NULL);
++	
+ 	for (;;) {
+ 		if (resize_pending) {
+ 			if (screen_open(resize_pending) < 0)
+@@ -864,7 +886,7 @@
+ {
+ 	fprintf(stderr,
+ "Usage:\n\
+- %s [-vpnb] [-a len] [-c conf] [-i ifname] [-s str] [-u port] [-R refresh] [-P purge] [-F file | expr]\n\
++ %s [-vpnb] [-a len] [-c conf] [-e time] [-i ifname] [-s str] [-u port] [-R refresh] [-P purge] [-F file | expr]\n\
+ Where:\n\
+  -v         Print version number, compile-time definitions, and exit\n\
+  -p         Don't put the interface(s) into promiscuous mode\n\
+@@ -872,6 +894,7 @@
+  -b         To place a backflow near to the main stream\n\
+  -a len     To aggregate IP addresses using the prefix length\n\
+  -c conf    Color config file instead of default /usr/local/etc/trafshow\n\
++ -e time    Set the period for change the file where export network statistics; min %d sec\n\
+  -i ifname  Network interface name; all by default\n\
+  -s str     To search & follow for string in the list show\n\
+  -u port    UDP port number to listen for Cisco Netflow; default %d\n\
+@@ -879,7 +902,7 @@
+  -P purge   Set the expired data purge-period to seconds; default %d sec\n\
+  -F file    Use file as input for the filter expression\n\
+  expr       Filter expression; see tcpdump(1) for syntax\n\
+-		\n", progname, CNF_PORT, REFRESH_TIME, PURGE_TIME);
++		\n", progname, EXPORT_MIN_WINDOW, CNF_PORT, REFRESH_TIME, PURGE_TIME);
+ 
+ 	exit(1);
+ }
+Files ./work-orig/trafshow-5.2.3/trafshow.core and ./work/trafshow-5.2.3/trafshow.core differ
+Files ./work-orig/trafshow-5.2.3/trafshow.o and ./work/trafshow-5.2.3/trafshow.o differ
